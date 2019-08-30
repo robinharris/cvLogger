@@ -1,0 +1,15 @@
+{
+    "terminal.integrated.env.linux": {
+        "PATH": "/home/robin/.platformio/penv/bin:/home/robin/.platformio/penv:/home/robin/bin:/home/robin/.local/bin:/home/robin/bin:/home/robin/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+        "PLATFORMIO_CALLER": "vscode"
+    },
+    "files.associations": {
+        "array": "cpp",
+        "deque": "cpp",
+        "list": "cpp",
+        "string": "cpp",
+        "unordered_map": "cpp",
+        "vector": "cpp",
+        "initializer_list": "cpp"
+    }
+}
