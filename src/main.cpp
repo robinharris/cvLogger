@@ -13,7 +13,28 @@ Date: 30-08-2019
 ESP8266WiFiMulti wifiConnection;
 // Global variables
 unsigned long wifiTimeoutDelay = 3000; // milliseconds to wait for a connection before aborting
- 
+
+// pin to monitor the button
+const byte interruptPin = 13;
+
+// used to keep track of the total number of interrrupts that have occurred
+int total = 0;
+
+// used to signal if a button press has been detected.  Volatile because it is used inside the ISR
+volatile boolean buttonPushed = false;
+
+// The ISR - notice the attribure ICACHE_RAM_ATTR must be used to it is held in IRAM
+void ICACHE_RAM_ATTR PushButton() {
+  // declared static so that it persists between one call and the next
+  volatile static unsigned long last_interrupt_time = 0;
+  unsigned long interrupt_time = millis();
+  if (interrupt_time - last_interrupt_time > 500UL)  // ignores interrupts for n milliseconds
+  {
+    buttonPushed = true;
+  }
+  last_interrupt_time = interrupt_time;
+}
+
 void setup() {
   // start a serial monitor
   Serial.begin(115200);
@@ -36,8 +57,15 @@ void setup() {
     // Print the IP address
     Serial.printf("IP address: %s\n\n", WiFi.localIP().toString().c_str());
   }
+  pinMode(interruptPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
 }
 
 void loop() {
-
+  if (buttonPushed){
+    total++;
+    Serial.print("An interrupt occured.  Total:\t");
+    Serial.println(total);
+    buttonPushed = false;
+  }
 }
