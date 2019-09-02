@@ -1,8 +1,8 @@
 /*
 Connects to WiFi using MULTI to allow connection to either Kercem2 or Workshop
-Next step is to add interrupt detection of button press
+Testing hardware debounce and long / short press detection
 Author: Robin Harris
-Date: 30-08-2019
+Date: 02-09-2019
 */
 
 
@@ -14,43 +14,33 @@ ESP8266WiFiMulti wifiConnection;
 
 // Global variables
 unsigned long wifiTimeoutDelay = 3000; // milliseconds to wait for a connection before aborting
-unsigned long bounceDelay = 10;
-unsigned long buttonDownMillis; // start of buttonDown period
-boolean waitingButtonRelease; // flag to indicate when a button release is expected
+volatile unsigned long buttonDownMillis; // start of buttonDown period
+volatile unsigned long buttonUpMillis; // end of buttonDown period
+volatile bool buttonState = false; // false = up, true = down
+bool oldButtonState = false;
 int total = 0; // used to keep track of the total number of interrrupts that have occurred
-// used to signal if a button press has been detected.  Volatile because it is used inside the ISR
-volatile boolean buttonPushed = false;
-volatile boolean buttonReleased = false;
-volatile unsigned long interruptTime;
 
 // pin to monitor the button
 const byte interruptPin = 13;
 
+void ICACHE_RAM_ATTR ReleaseButton();
+
 // The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
 // This ISR deals with a button press
 void ICACHE_RAM_ATTR PushButton() {
-  // declared static so that it persists between one call and the next
-  volatile static unsigned long last_interrupt_time = 0;
-  unsigned long interrupt_time = millis();
-  interruptTime = interrupt_time;
-  if (interrupt_time - last_interrupt_time > bounceDelay)  // ignores interrupts for n milliseconds
-  {
-    buttonPushed = true;
-  }
-  last_interrupt_time = interrupt_time;
+    buttonState = true;
+    buttonDownMillis = millis();
+    detachInterrupt(digitalPinToInterrupt(interruptPin));
+    attachInterrupt(digitalPinToInterrupt(interruptPin), ReleaseButton, RISING);
 }
 
 // The ISR - notice the attribure ICACHE_RAM_ATTR must be used to it is held in IRAM
 // This ISR deals with a button release
 void ICACHE_RAM_ATTR ReleaseButton() {
-  // declared static so that it persists between one call and the next
-  volatile static unsigned long last_interrupt_time = 0;
-  unsigned long interrupt_time = millis();
-  if (interrupt_time - last_interrupt_time > bounceDelay)  // ignores interrupts for n milliseconds
-  {
-    buttonReleased = true;
-  }
-  last_interrupt_time = interrupt_time;
+    buttonState = false;
+    buttonUpMillis = millis();
+    detachInterrupt(digitalPinToInterrupt(interruptPin));
+    attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
 }
 
 void setup() {
@@ -75,28 +65,34 @@ void setup() {
     // Print the IP address
     Serial.printf("IP address: %s\n\n", WiFi.localIP().toString().c_str());
   }
-  pinMode(interruptPin, INPUT_PULLUP);
+  pinMode(interruptPin, INPUT);
   attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
 }
 
 void loop() {
-  if (buttonPushed){
-    detachInterrupt(digitalPinToInterrupt(interruptPin));
-    buttonDownMillis = millis();
-    total++;
-    Serial.print("An interrupt occured.  Total:\t");
-    Serial.println(total);
-    waitingButtonRelease = true;
-    buttonPushed = false;
+  static unsigned long pushDuration;
+  static int totalShort = 0;
+  static int totalLong = 0;
+  // button goes from up to down 
+  if (oldButtonState == false && buttonState == true){
+      oldButtonState = true;
   }
-  if (waitingButtonRelease  && (millis() > (buttonDownMillis + bounceDelay))){
-    attachInterrupt(digitalPinToInterrupt(interruptPin), ReleaseButton, RISING);
-  }
-  if (buttonReleased && waitingButtonRelease){
-    detachInterrupt(digitalPinToInterrupt(interruptPin));
-    attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
-    buttonReleased = false;
-    waitingButtonRelease = false;
-    Serial.println(millis()- interruptTime);
+  // button goes from down (true) to false take action
+  if (oldButtonState == true && buttonState == false){
+    pushDuration = buttonUpMillis - buttonDownMillis;
+    oldButtonState = false; 
+
+    // deal with short pushes
+    if (pushDuration < 400){
+        totalShort++;
+    }
+
+    // deal with long pushes
+    else if (pushDuration >= 400){
+        totalLong++;
+        }
+        
+    Serial.printf("Duration of button press: %d\n", pushDuration);
+    Serial.printf("Total short pushes %d\t, Total long pushes %d\n", totalShort, totalLong);
   }
 }
