@@ -18,6 +18,7 @@ Date: 02-09-2019
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <FS.h>
+#include <Ticker.h>
 
 ESP8266WiFiMulti wifiConnection;
 ESP8266WebServer server(80);
@@ -41,7 +42,8 @@ float supplyVoltage = 0; // voltage of the supply
 float power_mW = 0;
 float energy_mWH = 0;
 char displayString[100]; // holds string ready to display
-String fileName = "testFile1.csv";
+String fileName = "testFile2.csv";
+int fileWriteInterval = 1000; // start with 1000mS between file writes
 
 // pin to monitor the button
 const byte interruptPin = 5; //GPIO5 = D1
@@ -52,9 +54,12 @@ void ina219values();
 void printDirectory();
 bool loadFromSpiffs(String path);
 void handleOther();
-void writeToLogFile(String);
+void writeToLogFile();
 // prototype ISR definition required because first ISR references second!
 void ICACHE_RAM_ATTR ReleaseButton();
+
+Ticker displayUpdate(displaydata, 500);
+Ticker fileUpdate(writeToLogFile, fileWriteInterval);
 
 // The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
 // This ISR deals with a button press
@@ -126,11 +131,16 @@ void setup()
     server.begin();
     SPIFFS.begin();
     ina219.begin();
+    displayUpdate.start();
+    fileUpdate.start();
     delay(2000); // time to read IP address
 }
 
 void loop()
+
 {
+    displayUpdate.update();
+    fileUpdate.update();
     static unsigned long pushDuration;
     static int totalShort = 0;
     static int totalLong = 0;
@@ -155,6 +165,8 @@ void loop()
         else if (pushDuration >= 400)
         {
             totalLong++;
+            fileUpdate.interval(fileWriteInterval * 2);
+            Serial.println("Doubled file update interval");
         }
 
         Serial.printf("Duration of button press: %lu\n", pushDuration);
@@ -162,20 +174,6 @@ void loop()
     }
     server.handleClient();
     ina219values();
-    displaydata();
-    delay(500);
-    String lineToOutput = String(millis());
-    lineToOutput += ",";
-    lineToOutput += String(supplyVoltage, 3);
-    lineToOutput += ",";
-    lineToOutput += String(busVoltage, 3);
-    lineToOutput += ",";
-    lineToOutput += String(current_mA, 3);
-    lineToOutput += ",";
-    lineToOutput += String(power_mW, 3);
-    lineToOutput += ",";
-    lineToOutput += String(energy_mWH, 3);
-    writeToLogFile(lineToOutput);
 }
 
 void displaydata()
@@ -184,8 +182,8 @@ void displaydata()
     display.setTextAlignment(TEXT_ALIGN_LEFT);
     display.drawString(0, 0, "Vin: " + String(supplyVoltage, 3));
     display.drawString(0, 12, "Vload: " + String(busVoltage, 3));
-    display.drawString(0, 24, "current mA: " + String(current_mA, 3));
-    display.drawString(0, 36, "Power mW: " + String(power_mW, 3));
+    display.drawString(0, 24, "current mA: " + String(current_mA, 1));
+    display.drawString(0, 36, "Power mW: " + String(power_mW, 0));
     display.drawString(0, 48, "Energy mWH: " + String(energy_mWH, 3));
     display.display();
 }
@@ -292,12 +290,23 @@ void handleOther()
     Serial.println(message);
 }
 
-void writeToLogFile(String line)
+void writeToLogFile()
 {
+    String lineToOutput = String(millis());
+    lineToOutput += ",";
+    lineToOutput += String(supplyVoltage, 3);
+    lineToOutput += ",";
+    lineToOutput += String(busVoltage, 3);
+    lineToOutput += ",";
+    lineToOutput += String(current_mA,1);
+    lineToOutput += ",";
+    lineToOutput += String(power_mW, 0);
+    lineToOutput += ",";
+    lineToOutput += String(energy_mWH, 3);
     cvLogFile = SPIFFS.open(fileName, "a");
     if (cvLogFile)
     {
-        cvLogFile.println(line);
+        cvLogFile.println(lineToOutput);
         cvLogFile.close();
     }
 }
