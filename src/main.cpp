@@ -3,6 +3,10 @@ Connects to WiFi using MULTI to allow connection to either Kercem2 or workshop
 Hardware debounce with interrupts on falling and rising to detect press and release.
 Time pressed counted and short / long press decoded.
 Reads INA219 each time round LOOP.
+Modified evening of 4th Sept.
+ToDo:
+   - add indicator on display to show if logging is active
+   - menu system for changing fileWriteInterval - only allow this option is loggingActive is false
 Author: Robin Harris
 Date: 02-09-2019
 */
@@ -33,8 +37,6 @@ volatile unsigned long buttonDownMillis; // start of buttonDown period
 volatile unsigned long buttonUpMillis;   // end of buttonDown period
 volatile bool buttonState = false;       // false = up, true = down
 bool oldButtonState = false;
-unsigned long sampleInterval = 100; // millis between reading INA219
-unsigned long logInterval = 100;    // millsi between log writes to file
 float shuntVoltage = 0;             // voltage across the shunt resistor
 float busVoltage = 0;               // voltage after the shunt resistor
 float current_mA = 0;
@@ -44,6 +46,7 @@ float energy_mWH = 0;
 char displayString[100]; // holds string ready to display
 String fileName = "testFile2.csv";
 int fileWriteInterval = 1000; // start with 1000mS between file writes
+bool loggingActive = false;
 
 // pin to monitor the button
 const byte interruptPin = 5; //GPIO5 = D1
@@ -55,11 +58,10 @@ void printDirectory();
 bool loadFromSpiffs(String path);
 void handleOther();
 void writeToLogFile();
-// prototype ISR definition required because first ISR references second!
 void ICACHE_RAM_ATTR ReleaseButton();
 
-Ticker displayUpdate(displaydata, 500);
-Ticker fileUpdate(writeToLogFile, fileWriteInterval);
+Ticker displayTicker(displaydata, 500);
+Ticker fileTicker(writeToLogFile, fileWriteInterval);
 
 // The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
 // This ISR deals with a button press
@@ -123,24 +125,26 @@ void setup()
     }
     pinMode(interruptPin, INPUT);
     attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
-    MDNS.begin("cv");
-    MDNS.addService("http", "tcp", 80);
     server.on("/list", HTTP_GET, printDirectory);
     server.on("/", HTTP_GET, printDirectory);
     server.onNotFound(handleOther);
-    server.begin();
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        server.begin();
+        MDNS.begin("cv");
+        MDNS.addService("http", "tcp", 80);
+    }
     SPIFFS.begin();
     ina219.begin();
-    displayUpdate.start();
-    fileUpdate.start();
+    displayTicker.start();
+    fileTicker.start();
     delay(2000); // time to read IP address
 }
 
 void loop()
-
 {
-    displayUpdate.update();
-    fileUpdate.update();
+    displayTicker.update();
+    fileTicker.update();
     static unsigned long pushDuration;
     static int totalShort = 0;
     static int totalLong = 0;
@@ -159,20 +163,24 @@ void loop()
         if (pushDuration < 400)
         {
             totalShort++;
+            loggingActive = !loggingActive;
         }
 
         // deal with long pushes
         else if (pushDuration >= 400)
         {
             totalLong++;
-            fileUpdate.interval(fileWriteInterval * 2);
+            fileWriteInterval = fileWriteInterval * 2;
+            fileTicker.interval(fileWriteInterval);
             Serial.println("Doubled file update interval");
         }
-
         Serial.printf("Duration of button press: %lu\n", pushDuration);
         Serial.printf("Total short pushes %d\t, Total long pushes %d\n", totalShort, totalLong);
     }
-    server.handleClient();
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        server.handleClient();
+    }
     ina219values();
 }
 
@@ -292,6 +300,10 @@ void handleOther()
 
 void writeToLogFile()
 {
+    if (!loggingActive)
+    {
+        return;
+    }
     String lineToOutput = String(millis());
     lineToOutput += ",";
     lineToOutput += String(supplyVoltage, 3);
