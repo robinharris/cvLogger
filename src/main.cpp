@@ -20,9 +20,9 @@ Date: 16-09-2019
 #include <SSD1306.h>
 #include <OLEDDisplayUi.h>
 #include <Adafruit_INA219.h>
-#include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <WiFiClient.h>
 #include <FS.h>
 #include <Ticker.h>
 #include "font.h"
@@ -140,7 +140,7 @@ void setup()
     Serial.begin(115200);
     delay(10);
     // display and ui stuff
-    ui.setTargetFPS(20);
+    ui.setTargetFPS(10);
     ui.disableAllIndicators();
     ui.setFrameAnimation(SLIDE_LEFT);
     ui.setFrames(frames, framesCount);
@@ -188,9 +188,8 @@ void setup()
     server.onNotFound(handleOther);
     if (WiFi.status() == WL_CONNECTED)
     {
-        server.begin();
         MDNS.begin("cv");
-        // MDNS.addService("http", "tcp", 80);
+        server.begin();
     }
     SPIFFS.begin();
     ina219.begin();
@@ -198,13 +197,14 @@ void setup()
     delay(2000); // time to read IP address
     ui.init();   // start the ui
     // now read the old filename and increment it
-    String fileName = updateFileName();
+    logFile = updateFileName();
 }
 
 void loop()
 {
     fileTicker.update();
     ui.update();
+    MDNS.update();
     static bool menuMode = false; // false = running
     static unsigned long pushDuration;
     static int totalShort = 0;
@@ -398,12 +398,12 @@ String updateFileName(){
     String oldFileName;
     File file = SPIFFS.open("nameForFile.txt", "r");
     oldFileName = file.readStringUntil('.');
+    file.close();
     String newFileName = String((oldFileName.toInt())+1);
     // go back to 1 when 99 is reached
     if (newFileName.toInt() > 99){
         newFileName = 1;
     }
-    file.close();
     newFileName += ".csv";
 
     file = SPIFFS.open("nameForFile.txt", "w");
