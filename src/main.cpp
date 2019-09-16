@@ -46,7 +46,7 @@ float displaySupplyVoltage = 0; // voltage of the supply
 float displayPower_mW = 0;
 float displayEnergy_mWH = 0;
 char displayString[100]; // holds string ready to display
-String fileName = "testFile7.csv";
+String fileName = "testFile1.csv";
 bool loggingActive = false;
 const int loggingInterval[] = {500, 1000, 30000, 60000, 300000, 600000}; // mS between log updates
 byte loggingIntervalIndex = 0;
@@ -58,6 +58,7 @@ const byte interruptPin = 5; //GPIO5 = D1
 //prototype function definitions
 void ina219values();
 void printDirectory();
+void deleteFile();
 bool loadFromSpiffs(String path);
 void handleOther();
 void writeToLogFile();
@@ -174,13 +175,14 @@ void setup()
     pinMode(interruptPin, INPUT);
     attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
     server.on("/list", HTTP_GET, printDirectory);
+    server.on("/delete", HTTP_GET, deleteFile);
     server.on("/", HTTP_GET, printDirectory);
     server.onNotFound(handleOther);
     if (WiFi.status() == WL_CONNECTED)
     {
         server.begin();
         MDNS.begin("cv");
-        MDNS.addService("http", "tcp", 80);
+        // MDNS.addService("http", "tcp", 80);
     }
     SPIFFS.begin();
     ina219.begin();
@@ -201,6 +203,7 @@ void loop()
     if (oldButtonState == false && buttonState == true)
     {
         oldButtonState = true;
+        Serial.println("button down");
     }
     // button goes from down (true) to false take action
     if (oldButtonState == true && buttonState == false)
@@ -342,6 +345,21 @@ bool loadFromSpiffs(String path)
     } //a lot happening here...
     dataFile.close();
     return true;
+}
+
+void deleteFile(){
+    Serial.print("Argument received: ");
+    String fileToDelete = server.arg(0);
+    Serial.println(fileToDelete);
+
+    if (SPIFFS.exists(fileToDelete)){
+        Serial.println("Found it");
+        SPIFFS.remove(fileToDelete);
+    }
+    else {
+        Serial.println("Does not exist");
+    }
+    printDirectory();
 }
 
 void handleOther()
