@@ -46,7 +46,7 @@ float displaySupplyVoltage = 0; // voltage of the supply
 float displayPower_mW = 0;
 float displayEnergy_mWH = 0;
 char displayString[100]; // holds string ready to display
-String fileName = "testFile1.csv";
+String fileName;;
 bool loggingActive = false;
 const int loggingInterval[] = {500, 1000, 30000, 60000, 300000, 600000}; // mS between log updates
 byte loggingIntervalIndex = 0;
@@ -61,6 +61,7 @@ void printDirectory();
 void deleteFile();
 bool loadFromSpiffs(String path);
 void handleOther();
+String updateFileName();
 void writeToLogFile();
 void ICACHE_RAM_ATTR ReleaseButton();
 // frame 1 on ui
@@ -189,6 +190,7 @@ void setup()
     fileTicker.start();
     delay(2000); // time to read IP address
     ui.init();   // start the ui
+    fileName = updateFileName();
 }
 
 void loop()
@@ -380,8 +382,27 @@ void handleOther()
     {
         message += " NAME:" + server.argName(i) + "\n VALUE:" + server.arg(i) + "\n";
     }
-    server.send(404, "text/plain", message);
-    Serial.println(message);
+    printDirectory();
+    // server.send(404, "text/plain", message);
+}
+
+String updateFileName(){
+    String oldFileName;
+    File file = SPIFFS.open("nameForFile.txt", "r");
+    oldFileName = file.readStringUntil('.');
+    String newFileName = String((oldFileName.toInt())+1);
+    // go back to 1 when 99 is reached
+    if (newFileName.toInt() > 99){
+        newFileName = 1;
+    }
+    file.close();
+    newFileName += ".csv";
+
+    file = SPIFFS.open("nameForFile.txt", "w");
+    file.println(newFileName);
+    file.close();
+
+    return newFileName;
 }
 
 void writeToLogFile()
