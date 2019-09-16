@@ -3,12 +3,15 @@ Connects to WiFi using MULTI to allow connection to either Kercem2 or workshop
 Hardware debounce with interrupts on falling and rising to detect press and release.
 Time pressed counted and short / long press decoded.
 Reads INA219 each time round LOOP.
-Modified evening of 4th Sept.
+Modified 16th September 2019
+    - added a file delete option 
+    - increments file name each time setup runs
+
 ToDo:
-   - add indicator on display to show if logging is active
-   - menu system for changing fileWriteInterval - only allow this option is loggingActive is false
+   - 
+   - 
 Author: Robin Harris
-Date: 02-09-2019
+Date: 16-09-2019
 */
 
 #include <Arduino.h>
@@ -26,7 +29,7 @@ Date: 02-09-2019
 
 ESP8266WiFiMulti wifiConnection;
 ESP8266WebServer server(80);
-File cvLogFile;
+
 // Initialize the OLED display using Wire library
 SSD1306Wire display(0x3c, D3, D4);
 OLEDDisplayUi ui(&display);
@@ -46,14 +49,14 @@ float displaySupplyVoltage = 0; // voltage of the supply
 float displayPower_mW = 0;
 float displayEnergy_mWH = 0;
 char displayString[100]; // holds string ready to display
-String fileName;;
+String logFile;
 bool loggingActive = false;
 const int loggingInterval[] = {500, 1000, 30000, 60000, 300000, 600000}; // mS between log updates
 byte loggingIntervalIndex = 0;
 const unsigned long displayInterval = 500; // mS between OLED updates
-
 // pin to monitor the button
 const byte interruptPin = 5; //GPIO5 = D1
+// end globals
 
 //prototype function definitions
 void ina219values();
@@ -64,6 +67,8 @@ void handleOther();
 String updateFileName();
 void writeToLogFile();
 void ICACHE_RAM_ATTR ReleaseButton();
+// end prototype functiond
+
 // frame 1 on ui
 void running(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 { 
@@ -75,7 +80,8 @@ void running(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t
     display->drawString(0 + x, 24 + y, "current mA: " + String(displayCurrent_mA, 1));
     display->drawString(0 + x, 36 + y, "Power mW: " + String(displayPower_mW, 0));
     display->drawString(0 + x, 48 + y, "Energy mWH: " + String(displayEnergy_mWH, 3));
-};
+}
+
 // frame 2 on ui
 void menu(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 { 
@@ -84,6 +90,7 @@ void menu(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
     display->setFont(Arimo_Bold_16);
     display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]) + "mS");
 }
+
 // indicator when logging is running
 void overlayLogging(OLEDDisplay *display, OLEDDisplayUiState *state)
 {
@@ -103,6 +110,8 @@ FrameCallback frames[] = {running, menu};
 OverlayCallback overlays[] = {overlayLogging};
 int overlaysCount = 1;
 int framesCount = 2;
+
+// timer to trigger file writing at the required interval
 Ticker fileTicker(writeToLogFile, loggingInterval[loggingIntervalIndex]);
 
 // The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
@@ -148,6 +157,7 @@ void setup()
     wifiConnection.addAP("Kercem2", "E0E3106433F4");
     wifiConnection.addAP("workshop", "workshop");
 
+    // try to make a wifi connection with a timeout in case we are out of range
     unsigned long startConnectionMillis = millis();
     while (wifiConnection.run() != WL_CONNECTED && (millis() < startConnectionMillis + wifiTimeoutDelay))
     {
@@ -156,20 +166,17 @@ void setup()
     }
     if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("No wifi connection found");
         display.drawString(0, 20, "No wifi connection found");
         display.display();
     }
     else
     {
         sprintf(displayString, "\nConnected to %s\n\n", WiFi.SSID().c_str());
-        Serial.print(displayString);
         display.clear();
         display.drawString(0, 20, displayString);
 
         // Print the IP address
         sprintf(displayString, "\nIP address: %s\n\n", WiFi.localIP().toString().c_str());
-        Serial.print(displayString);
         display.drawString(0, 40, displayString);
         display.display();
     }
@@ -190,7 +197,8 @@ void setup()
     fileTicker.start();
     delay(2000); // time to read IP address
     ui.init();   // start the ui
-    fileName = updateFileName();
+    // now read the old filename and increment it
+    String fileName = updateFileName();
 }
 
 void loop()
@@ -205,7 +213,6 @@ void loop()
     if (oldButtonState == false && buttonState == true)
     {
         oldButtonState = true;
-        Serial.println("button down");
     }
     // button goes from down (true) to false take action
     if (oldButtonState == true && buttonState == false)
@@ -239,15 +246,16 @@ void loop()
             menuMode = false;
             totalLong++;
             fileTicker.interval(loggingInterval[loggingIntervalIndex]);
-            Serial.printf("Logging interval %d\n\n", loggingInterval[loggingIntervalIndex]);
+            // Serial.printf("Logging interval %d\n\n", loggingInterval[loggingIntervalIndex]);
         }
-        Serial.printf("Duration of button press: %lu\n", pushDuration);
-        Serial.printf("Total short pushes %d\t, Total long pushes %d\n", totalShort, totalLong);
     }
+
+    // handle client requests if we have a WiFi connection
     if (WiFi.status() == WL_CONNECTED)
     {
         server.handleClient();
     }
+    // get the latest values from the ina219
     ina219values();
 }
 
@@ -407,6 +415,7 @@ String updateFileName(){
 
 void writeToLogFile()
 {
+    File cvLogFile;
     if (!loggingActive)
     {
         return;
@@ -422,7 +431,7 @@ void writeToLogFile()
     lineToOutput += String(displayPower_mW, 0);
     lineToOutput += ",";
     lineToOutput += String(displayEnergy_mWH, 3);
-    cvLogFile = SPIFFS.open(fileName, "a");
+    cvLogFile = SPIFFS.open(logFile, "a");
     if (cvLogFile)
     {
         cvLogFile.println(lineToOutput);
