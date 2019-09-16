@@ -17,18 +17,19 @@ Date: 02-09-2019
 #include <SSD1306.h>
 #include <OLEDDisplayUi.h>
 #include <Adafruit_INA219.h>
-#include "font.h"
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <FS.h>
 #include <Ticker.h>
+#include "font.h"
 
 ESP8266WiFiMulti wifiConnection;
 ESP8266WebServer server(80);
 File cvLogFile;
 // Initialize the OLED display using Wire library
 SSD1306Wire display(0x3c, D3, D4);
+OLEDDisplayUi ui(&display);
 Adafruit_INA219 ina219;
 
 // Global variables
@@ -37,31 +38,70 @@ volatile unsigned long buttonDownMillis; // start of buttonDown period
 volatile unsigned long buttonUpMillis;   // end of buttonDown period
 volatile bool buttonState = false;       // false = up, true = down
 bool oldButtonState = false;
-float shuntVoltage = 0;             // voltage across the shunt resistor
-float busVoltage = 0;               // voltage after the shunt resistor
-float current_mA = 0;
-float supplyVoltage = 0; // voltage of the supply
-float power_mW = 0;
-float energy_mWH = 0;
+// global variables ready for display
+float displayShuntVoltage = 0; // voltage across the shunt resistor
+float displayBusVoltage = 0;   // voltage after the shunt resistor
+float displayCurrent_mA = 0;
+float displaySupplyVoltage = 0; // voltage of the supply
+float displayPower_mW = 0;
+float displayEnergy_mWH = 0;
 char displayString[100]; // holds string ready to display
-String fileName = "testFile2.csv";
-int fileWriteInterval = 1000; // start with 1000mS between file writes
+String fileName = "testFile7.csv";
 bool loggingActive = false;
+const int loggingInterval[] = {500, 1000, 30000, 60000, 300000, 600000}; // mS between log updates
+byte loggingIntervalIndex = 0;
+const unsigned long displayInterval = 500; // mS between OLED updates
 
 // pin to monitor the button
 const byte interruptPin = 5; //GPIO5 = D1
 
 //prototype function definitions
-void displaydata();
 void ina219values();
 void printDirectory();
 bool loadFromSpiffs(String path);
 void handleOther();
 void writeToLogFile();
 void ICACHE_RAM_ATTR ReleaseButton();
+// frame 1 on ui
+void running(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
+{ 
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+    display->setFont(ArialMT_Plain_10);
+    display->clear();
+    display->drawString(0 + x, 0 + y, "Vin: " + String(displaySupplyVoltage, 3));
+    display->drawString(0 + x, 12 + y, "Vload: " + String(displayBusVoltage, 3));
+    display->drawString(0 + x, 24 + y, "current mA: " + String(displayCurrent_mA, 1));
+    display->drawString(0 + x, 36 + y, "Power mW: " + String(displayPower_mW, 0));
+    display->drawString(0 + x, 48 + y, "Energy mWH: " + String(displayEnergy_mWH, 3));
+};
+// frame 2 on ui
+void menu(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
+{ 
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+    display->clear();
+    display->setFont(Arimo_Bold_16);
+    display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]) + "mS");
+}
+// indicator when logging is running
+void overlayLogging(OLEDDisplay *display, OLEDDisplayUiState *state)
+{
+    display->setTextAlignment(TEXT_ALIGN_RIGHT);
+    display->setFont(ArialMT_Plain_10);
+    if (loggingActive)
+    {
+        display->drawString(128, 0, "Logging");
+    }
+    else
+    {
+        display->drawString(128, 0, "       ");
+    }
+}
 
-Ticker displayTicker(displaydata, 500);
-Ticker fileTicker(writeToLogFile, fileWriteInterval);
+FrameCallback frames[] = {running, menu};
+OverlayCallback overlays[] = {overlayLogging};
+int overlaysCount = 1;
+int framesCount = 2;
+Ticker fileTicker(writeToLogFile, loggingInterval[loggingIntervalIndex]);
 
 // The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
 // This ISR deals with a button press
@@ -88,6 +128,14 @@ void setup()
     // start a serial monitor
     Serial.begin(115200);
     delay(10);
+    // display and ui stuff
+    ui.setTargetFPS(20);
+    ui.disableAllIndicators();
+    ui.setFrameAnimation(SLIDE_LEFT);
+    ui.setFrames(frames, framesCount);
+    ui.setOverlays(overlays, overlaysCount);
+    ui.disableAutoTransition();
+
     display.init();
     display.clear();
     display.setTextAlignment(TEXT_ALIGN_LEFT);
@@ -136,15 +184,16 @@ void setup()
     }
     SPIFFS.begin();
     ina219.begin();
-    displayTicker.start();
     fileTicker.start();
     delay(2000); // time to read IP address
+    ui.init();   // start the ui
 }
 
 void loop()
 {
-    displayTicker.update();
     fileTicker.update();
+    ui.update();
+    static bool menuMode = false; // false = running
     static unsigned long pushDuration;
     static int totalShort = 0;
     static int totalLong = 0;
@@ -160,19 +209,32 @@ void loop()
         oldButtonState = false;
 
         // deal with short pushes
-        if (pushDuration < 400)
+        if (pushDuration < 400 && !menuMode)
         {
             totalShort++;
             loggingActive = !loggingActive;
         }
 
-        // deal with long pushes
-        else if (pushDuration >= 400)
+        else if (pushDuration < 400 && menuMode)
         {
+            loggingIntervalIndex = (loggingIntervalIndex + 1) % 5;
+        }
+
+        // deal with long pushes
+        else if (pushDuration >= 400 && !menuMode)
+        {
+            menuMode = true;
+            loggingActive = false;
+            ui.switchToFrame(1);
             totalLong++;
-            fileWriteInterval = fileWriteInterval * 2;
-            fileTicker.interval(fileWriteInterval);
-            Serial.println("Doubled file update interval");
+        }
+        else if (pushDuration >= 400 && menuMode)
+        {
+            ui.switchToFrame(0);
+            menuMode = false;
+            totalLong++;
+            fileTicker.interval(loggingInterval[loggingIntervalIndex]);
+            Serial.printf("Logging interval %d\n\n", loggingInterval[loggingIntervalIndex]);
         }
         Serial.printf("Duration of button press: %lu\n", pushDuration);
         Serial.printf("Total short pushes %d\t, Total long pushes %d\n", totalShort, totalLong);
@@ -184,28 +246,34 @@ void loop()
     ina219values();
 }
 
-void displaydata()
-{
-    display.clear();
-    display.setTextAlignment(TEXT_ALIGN_LEFT);
-    display.drawString(0, 0, "Vin: " + String(supplyVoltage, 3));
-    display.drawString(0, 12, "Vload: " + String(busVoltage, 3));
-    display.drawString(0, 24, "current mA: " + String(current_mA, 1));
-    display.drawString(0, 36, "Power mW: " + String(power_mW, 0));
-    display.drawString(0, 48, "Energy mWH: " + String(energy_mWH, 3));
-    display.display();
-}
-
 void ina219values()
 {
+    float shuntVoltage = 0; // voltage across the shunt resistor
+    float busVoltage = 0;   // voltage after the shunt resistor
+    float current_mA = 0;
+    float supplyVoltage = 0; // voltage of the supply
+    float power_mW = 0;
+    static float energy_mWH = 0;
     static unsigned long previousMillis = 0;
     unsigned long millisNow = millis();
+    static unsigned long elapsedMillis = 0;
+    elapsedMillis += (millisNow - previousMillis);
     shuntVoltage = ina219.getShuntVoltage_mV(); //the voltage ACROSS the shunt
     busVoltage = ina219.getBusVoltage_V();      //the voltage AFTER the shunt
     current_mA = ina219.getCurrent_mA();
     power_mW = ina219.getPower_mW();
     supplyVoltage = busVoltage + shuntVoltage / 1000;
     energy_mWH += power_mW * (millisNow - previousMillis) / 3600000;
+    // copy current values to a global variable for display
+    if (elapsedMillis > displayInterval)
+    {
+        displaySupplyVoltage = supplyVoltage;
+        displayBusVoltage = busVoltage;
+        displayCurrent_mA = current_mA;
+        displayPower_mW = power_mW;
+        displayEnergy_mWH = energy_mWH;
+        elapsedMillis = 0;
+    }
     previousMillis = millisNow;
 }
 
@@ -306,15 +374,15 @@ void writeToLogFile()
     }
     String lineToOutput = String(millis());
     lineToOutput += ",";
-    lineToOutput += String(supplyVoltage, 3);
+    lineToOutput += String(displaySupplyVoltage, 3);
     lineToOutput += ",";
-    lineToOutput += String(busVoltage, 3);
+    lineToOutput += String(displayBusVoltage, 3);
     lineToOutput += ",";
-    lineToOutput += String(current_mA,1);
+    lineToOutput += String(displayCurrent_mA, 1);
     lineToOutput += ",";
-    lineToOutput += String(power_mW, 0);
+    lineToOutput += String(displayPower_mW, 0);
     lineToOutput += ",";
-    lineToOutput += String(energy_mWH, 3);
+    lineToOutput += String(displayEnergy_mWH, 3);
     cvLogFile = SPIFFS.open(fileName, "a");
     if (cvLogFile)
     {
