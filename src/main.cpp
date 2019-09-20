@@ -193,6 +193,7 @@ void setup()
     }
     SPIFFS.begin();
     ina219.begin();
+    ina219.setCalibration_16V_400mA();
     fileTicker.start();
     delay(2000); // time to read IP address
     ui.init();   // start the ui
@@ -261,31 +262,33 @@ void loop()
 
 void ina219values()
 {
-    float shuntVoltage = 0; // voltage across the shunt resistor
-    float busVoltage = 0;   // voltage after the shunt resistor
-    float current_mA = 0;
-    float supplyVoltage = 0; // voltage of the supply
-    float power_mW = 0;
+    static float cumulativeShuntVoltage = 0; // voltage across the shunt resistor
+    static float cumulativeBusVoltage = 0;   // voltage after the shunt resistor
+    static float cumulativeCurrent_mA = 0;
     static float energy_mWH = 0;
+    static unsigned long numberOfReadings = 0;
     static unsigned long previousMillis = 0;
     unsigned long millisNow = millis();
     static unsigned long elapsedMillis = 0;
     elapsedMillis += (millisNow - previousMillis);
-    shuntVoltage = ina219.getShuntVoltage_mV(); //the voltage ACROSS the shunt
-    busVoltage = ina219.getBusVoltage_V();      //the voltage AFTER the shunt
-    current_mA = ina219.getCurrent_mA();
-    power_mW = ina219.getPower_mW();
-    supplyVoltage = busVoltage + shuntVoltage / 1000;
-    energy_mWH += power_mW * (millisNow - previousMillis) / 3600000;
-    // copy current values to a global variable for display
+    numberOfReadings++;
+    cumulativeShuntVoltage += ina219.getShuntVoltage_mV(); //the voltage ACROSS the shunt
+    cumulativeBusVoltage += ina219.getBusVoltage_V();      //the voltage AFTER the shunt
+    cumulativeCurrent_mA += ina219.getCurrent_mA();
+    energy_mWH += ina219.getBusVoltage_V() * ina219.getCurrent_mA() * (millisNow - previousMillis) / 3600000;
+    // average for the interval is copied to global variables for display
     if (elapsedMillis > displayInterval)
     {
-        displaySupplyVoltage = supplyVoltage;
-        displayBusVoltage = busVoltage;
-        displayCurrent_mA = current_mA;
-        displayPower_mW = power_mW;
+        displaySupplyVoltage = (cumulativeBusVoltage + (cumulativeShuntVoltage/100)) / numberOfReadings;
+        displayCurrent_mA = cumulativeCurrent_mA / numberOfReadings;
+        displayBusVoltage = cumulativeBusVoltage / numberOfReadings;
+        displayPower_mW = displayBusVoltage * displayCurrent_mA;
         displayEnergy_mWH = energy_mWH;
         elapsedMillis = 0;
+        numberOfReadings = 0;
+        cumulativeBusVoltage = 0;
+        cumulativeCurrent_mA = 0;
+        cumulativeShuntVoltage = 0;
     }
     previousMillis = millisNow;
 }
