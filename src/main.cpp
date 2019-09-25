@@ -3,15 +3,16 @@ Connects to WiFi using MULTI to allow connection to either Kercem2 or workshop
 Hardware debounce with interrupts on falling and rising to detect press and release.
 Time pressed counted and short / long press decoded.
 Reads INA219 each time round LOOP.
-Modified 16th September 2019
+Modified 20th September 2019
     - added a file delete option 
     - increments file name each time setup runs
-
+    - averaged over the display interval
+    - set resolution to 16V and 400mA
 ToDo:
-   - 
+   - average over logging interval
    - 
 Author: Robin Harris
-Date: 16-09-2019
+Date: 20-09-2019
 */
 
 #include <Arduino.h>
@@ -55,7 +56,7 @@ const int loggingInterval[] = {500, 1000, 30000, 60000, 300000, 600000}; // mS b
 byte loggingIntervalIndex = 0;
 const unsigned long displayInterval = 500; // mS between OLED updates
 // pin to monitor the button
-const byte interruptPin = 5; //GPIO5 = D1
+const byte interruptPin = 12; //GPIO12 = D6
 // end globals
 
 //prototype function definitions
