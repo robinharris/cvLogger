@@ -11,5 +11,9 @@
         "unordered_map": "cpp",
         "vector": "cpp",
         "initializer_list": "cpp"
+    },
+    "terminal.integrated.env.osx": {
+        "PATH": "/Users/robin/.platformio/penv/bin:/Users/robin/.platformio/penv:/usr/local/mysql/bin:/usr/local/sbin:/Library/Frameworks/Python.framework/Versions/3.6/bin:/Library/Frameworks/Python.framework/Versions/3.6/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Applications/Wireshark.app/Contents/MacOS:/Users/robin/esp/xtensa-esp32-elf/bin",
+        "PLATFORMIO_CALLER": "vscode"
     }
 }

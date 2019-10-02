@@ -3,14 +3,16 @@ Connects to WiFi using MULTI to allow connection to either Kercem2 or workshop
 Hardware debounce with interrupts on falling and rising to detect press and release.
 Time pressed counted and short / long press decoded.
 Reads INA219 each time round LOOP.
-Modified 30th September 2019
-    - completely restructured
-    - directly accessing INA219 - no library
+Modified 20th September 2019
+    - added a file delete option 
+    - increments file name each time setup runs
+    - averaged over the display interval
+    - set resolution to 16V and 400mA
 ToDo:
-   - 
+   - average over logging interval
    - 
 Author: Robin Harris
-Date: 30-09-2019
+Date: 20-09-2019
 */
 
 #include <Arduino.h>
@@ -18,13 +20,13 @@ Date: 30-09-2019
 #include <ESP8266WiFiMulti.h>
 #include <SSD1306.h>
 #include <OLEDDisplayUi.h>
+#include <Adafruit_INA219.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <FS.h>
+#include <Ticker.h>
 #include "font.h"
-
-#define Addr_INA219 0x40
 
 ESP8266WiFiMulti wifiConnection;
 ESP8266WebServer server(80);
@@ -32,6 +34,7 @@ ESP8266WebServer server(80);
 // Initialize the OLED display using Wire library
 SSD1306Wire display(0x3c, D3, D4);
 OLEDDisplayUi ui(&display);
+Adafruit_INA219 ina219;
 
 // Global variables
 unsigned long wifiTimeoutDelay = 3000;   // milliseconds to wait for a connection before aborting
@@ -40,7 +43,8 @@ volatile unsigned long buttonUpMillis;   // end of buttonDown period
 volatile bool buttonState = false;       // false = up, true = down
 bool oldButtonState = false;
 // global variables ready for display
-float displayBusVoltage = 0; // voltage after the shunt resistor
+float displayShuntVoltage = 0; // voltage across the shunt resistor
+float displayBusVoltage = 0;   // voltage after the shunt resistor
 float displayCurrent_mA = 0;
 float displaySupplyVoltage = 0; // voltage of the supply
 float displayPower_mW = 0;
@@ -49,37 +53,26 @@ char displayString[100]; // holds string ready to display
 String logFile;
 bool loggingActive = false;
 const int loggingInterval[] = {500, 1000, 5000, 10000, 30000, 60000, 300000, 600000}; // mS between log updates
-const int numberOfIntervals = sizeof(loggingInterval) / sizeof(loggingInterval[0]);
 byte loggingIntervalIndex = 0;
-unsigned long fileUpdateInterval = loggingInterval[0];
 const unsigned long displayInterval = 500; // mS between OLED updates
 // pin to monitor the button
-const byte interruptPin = 5; //GPIO12 = D6 GPIO05 = D1
-
-// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// INA219 Configuration
-const uint16_t config_INA219 = 0x119f;
-const uint16_t cal_INA219 = 0x2800;
-const float currentDivider = 2.5;
-const float powerMultiplier = 0.8;
-// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
+const byte interruptPin = 12; //GPIO12 = D6
 // end globals
 
 //prototype function definitions
-void handleDisplayData(float, float, float, float);
-void handleFileData(float, float, float, float);
+void ina219values();
 void printDirectory();
 void deleteFile();
 bool loadFromSpiffs(String path);
 void handleOther();
 String updateFileName();
+void writeToLogFile();
 void ICACHE_RAM_ATTR ReleaseButton();
-// end prototype functions
+// end prototype functiond
 
 // frame 1 on ui
 void running(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
-{
+{ 
     display->setTextAlignment(TEXT_ALIGN_LEFT);
     display->setFont(ArialMT_Plain_10);
     display->clear();
@@ -92,18 +85,11 @@ void running(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t
 
 // frame 2 on ui
 void menu(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
-{
+{ 
     display->setTextAlignment(TEXT_ALIGN_LEFT);
     display->clear();
     display->setFont(Arimo_Bold_16);
-    if (loggingInterval[loggingIntervalIndex] < 1000)
-    {
-        display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]) + " mS");
-    }
-    else
-    {
-        display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]) + " S");
-    }
+    display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]) + "mS");
 }
 
 // indicator when logging is running
@@ -125,6 +111,9 @@ FrameCallback frames[] = {running, menu};
 OverlayCallback overlays[] = {overlayLogging};
 int overlaysCount = 1;
 int framesCount = 2;
+
+// timer to trigger file writing at the required interval
+Ticker fileTicker(writeToLogFile, loggingInterval[loggingIntervalIndex]);
 
 // The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
 // This ISR deals with a button press
@@ -204,40 +193,24 @@ void setup()
         server.begin();
     }
     SPIFFS.begin();
+    ina219.begin();
+    ina219.setCalibration_16V_400mA();
+    fileTicker.start();
     delay(2000); // time to read IP address
     ui.init();   // start the ui
     // now read the old filename and increment it
     logFile = updateFileName();
-
-    // Set up INA219 and configure
-    Wire.begin();
-    // Write config register 0x00
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x00);
-    Wire.write((config_INA219 >> 8) & 0xFF); // Upper 8-bits
-    Wire.write(config_INA219 & 0xFF);        // Lower 8-bits
-    Wire.endTransmission();
-    // Write calibration register 0x05
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x05);
-    Wire.write((cal_INA219 >> 8) & 0xFF); // Upper 8-bits
-    Wire.write(cal_INA219 & 0xFF);        // Lower 8-bits
-    Wire.endTransmission();
 }
 
 void loop()
 {
-    static float shuntVoltage = 0; // voltage across the shunt resistor
-    static float busVoltage = 0;   // voltage after the shunt resistor
-    static float current_mA = 0;
-    static float energy_mWH = 0;
-    static unsigned long previousLoopMillis = 0;
+    fileTicker.update();
+    ui.update();
+    MDNS.update();
     static bool menuMode = false; // false = running
     static unsigned long pushDuration;
     static int totalShort = 0;
     static int totalLong = 0;
-    ui.update();
-    MDNS.update();
     // button goes from up to down
     if (oldButtonState == false && buttonState == true)
     {
@@ -258,7 +231,7 @@ void loop()
 
         else if (pushDuration < 400 && menuMode)
         {
-            loggingIntervalIndex = (loggingIntervalIndex + 1) % numberOfIntervals;
+            loggingIntervalIndex = (loggingIntervalIndex + 1) % 5;
         }
 
         // deal with long pushes
@@ -274,7 +247,8 @@ void loop()
             ui.switchToFrame(0);
             menuMode = false;
             totalLong++;
-            fileUpdateInterval = (loggingInterval[loggingIntervalIndex]);
+            fileTicker.interval(loggingInterval[loggingIntervalIndex]);
+            // Serial.printf("Logging interval %d\n\n", loggingInterval[loggingIntervalIndex]);
         }
     }
 
@@ -284,109 +258,40 @@ void loop()
         server.handleClient();
     }
     // get the latest values from the ina219
+    ina219values();
+}
+
+void ina219values()
+{
+    static float cumulativeShuntVoltage = 0; // voltage across the shunt resistor
+    static float cumulativeBusVoltage = 0;   // voltage after the shunt resistor
+    static float cumulativeCurrent_mA = 0;
+    static float energy_mWH = 0;
+    static unsigned long numberOfReadings = 0;
+    static unsigned long previousMillis = 0;
     unsigned long millisNow = millis();
-    // get shunt voltage
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x01);
-    Wire.endTransmission();
-    Wire.requestFrom(Addr_INA219, 2);
-    shuntVoltage = Wire.read()<<8 | Wire.read();
-    // get bus voltage
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x02);
-    Wire.endTransmission();
-    Wire.requestFrom(Addr_INA219, 2);
-    busVoltage = Wire.read()<<8 | Wire.read();
-    // get current 
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x04);
-    Wire.endTransmission();
-    Wire.requestFrom(Addr_INA219, 2);
-    current_mA = Wire.read()<<8 | Wire.read();
-    energy_mWH += busVoltage * current_mA * (millisNow - previousLoopMillis) / 3600000;
-    previousLoopMillis = millisNow;
-    handleDisplayData(shuntVoltage, busVoltage, current_mA, energy_mWH);
-    handleFileData(shuntVoltage, busVoltage, current_mA, energy_mWH);
-}
-
-void handleDisplayData(float shuntVoltage, float busVoltage, float current, float energy)
-{
-    static float cumShuntVoltage = 0;
-    static float cumBusVoltage = 0;
-    static float cumCurrent = 0;
-    static int numberOfReadings = 0;
-    unsigned long millisNow;
-    static unsigned long previousMillis = 0;
-
-    millisNow = millis();
-    previousMillis = millisNow;
-    cumShuntVoltage += shuntVoltage;
-    cumBusVoltage += busVoltage;
-    cumCurrent += current;
+    static unsigned long elapsedMillis = 0;
+    elapsedMillis += (millisNow - previousMillis);
     numberOfReadings++;
-
+    cumulativeShuntVoltage += ina219.getShuntVoltage_mV(); //the voltage ACROSS the shunt
+    cumulativeBusVoltage += ina219.getBusVoltage_V();      //the voltage AFTER the shunt
+    cumulativeCurrent_mA += ina219.getCurrent_mA();
+    energy_mWH += ina219.getBusVoltage_V() * ina219.getCurrent_mA() * (millisNow - previousMillis) / 3600000;
     // average for the interval is copied to global variables for display
-    if ((millisNow - previousMillis) > displayInterval)
+    if (elapsedMillis > displayInterval)
     {
-        displaySupplyVoltage = (cumBusVoltage + (cumShuntVoltage / 100)) / numberOfReadings;
-        displayCurrent_mA = cumCurrent / numberOfReadings;
-        displayBusVoltage = cumBusVoltage / numberOfReadings;
+        displaySupplyVoltage = (cumulativeBusVoltage + (cumulativeShuntVoltage/100)) / numberOfReadings;
+        displayCurrent_mA = cumulativeCurrent_mA / numberOfReadings;
+        displayBusVoltage = cumulativeBusVoltage / numberOfReadings;
         displayPower_mW = displayBusVoltage * displayCurrent_mA;
-        displayEnergy_mWH = energy;
-        previousMillis = 0;
+        displayEnergy_mWH = energy_mWH;
+        elapsedMillis = 0;
         numberOfReadings = 0;
-        cumBusVoltage = 0;
-        cumCurrent = 0;
-        cumShuntVoltage = 0;
+        cumulativeBusVoltage = 0;
+        cumulativeCurrent_mA = 0;
+        cumulativeShuntVoltage = 0;
     }
-}
-
-void handleFileData(float shuntVoltage, float busVoltage, float current, float energy)
-{
-    static float cumShuntVoltage = 0;
-    static float cumBusVoltage = 0;
-    static float cumCurrent = 0;
-    static int numberOfReadings = 0;
-    unsigned long millisNow;
-    static unsigned long previousMillis = 0;
-
-    millisNow = millis();
-    cumShuntVoltage += shuntVoltage;
-    cumBusVoltage += busVoltage;
-    cumCurrent += current;
-    numberOfReadings++;
-
-    // average for the interval is written to the file
-    if ((millisNow - previousMillis) > fileUpdateInterval)
-    {
-        File cvLogFile;
-        if (!loggingActive)
-        {
-            return;
-        }
-        String lineToOutput = String(millisNow);
-        lineToOutput += ",";
-        lineToOutput += String((cumBusVoltage + (cumShuntVoltage / 100)) / numberOfReadings, 3);
-        lineToOutput += ",";
-        lineToOutput += String(cumBusVoltage / numberOfReadings, 3);
-        lineToOutput += ",";
-        lineToOutput += String(cumCurrent / numberOfReadings, 1);
-        lineToOutput += ",";
-        lineToOutput += String(cumBusVoltage * cumCurrent, 0);
-        lineToOutput += ",";
-        lineToOutput += String(energy, 3);
-        cvLogFile = SPIFFS.open(logFile, "a");
-        if (cvLogFile)
-        {
-            cvLogFile.println(lineToOutput);
-            cvLogFile.close();
-        }
-        previousMillis = millisNow;
-        numberOfReadings = 0;
-        cumBusVoltage = 0;
-        cumCurrent = 0;
-        cumShuntVoltage = 0;
-    }
+    previousMillis = millisNow;
 }
 
 void printDirectory()
@@ -456,19 +361,16 @@ bool loadFromSpiffs(String path)
     return true;
 }
 
-void deleteFile()
-{
+void deleteFile(){
     Serial.print("Argument received: ");
     String fileToDelete = server.arg(0);
     Serial.println(fileToDelete);
 
-    if (SPIFFS.exists(fileToDelete))
-    {
+    if (SPIFFS.exists(fileToDelete)){
         Serial.println("Found it");
         SPIFFS.remove(fileToDelete);
     }
-    else
-    {
+    else {
         Serial.println("Does not exist");
     }
     printDirectory();
@@ -496,16 +398,14 @@ void handleOther()
     // server.send(404, "text/plain", message);
 }
 
-String updateFileName()
-{
+String updateFileName(){
     String oldFileName;
     File file = SPIFFS.open("nameForFile.txt", "r");
     oldFileName = file.readStringUntil('.');
     file.close();
-    String newFileName = String((oldFileName.toInt()) + 1);
+    String newFileName = String((oldFileName.toInt())+1);
     // go back to 1 when 99 is reached
-    if (newFileName.toInt() > 99)
-    {
+    if (newFileName.toInt() > 99){
         newFileName = 1;
     }
     newFileName += ".csv";
@@ -515,4 +415,30 @@ String updateFileName()
     file.close();
 
     return newFileName;
+}
+
+void writeToLogFile()
+{
+    File cvLogFile;
+    if (!loggingActive)
+    {
+        return;
+    }
+    String lineToOutput = String(millis());
+    lineToOutput += ",";
+    lineToOutput += String(displaySupplyVoltage, 3);
+    lineToOutput += ",";
+    lineToOutput += String(displayBusVoltage, 3);
+    lineToOutput += ",";
+    lineToOutput += String(displayCurrent_mA, 1);
+    lineToOutput += ",";
+    lineToOutput += String(displayPower_mW, 0);
+    lineToOutput += ",";
+    lineToOutput += String(displayEnergy_mWH, 3);
+    cvLogFile = SPIFFS.open(logFile, "a");
+    if (cvLogFile)
+    {
+        cvLogFile.println(lineToOutput);
+        cvLogFile.close();
+    }
 }

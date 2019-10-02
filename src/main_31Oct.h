@@ -3,14 +3,13 @@ Connects to WiFi using MULTI to allow connection to either Kercem2 or workshop
 Hardware debounce with interrupts on falling and rising to detect press and release.
 Time pressed counted and short / long press decoded.
 Reads INA219 each time round LOOP.
-Modified 30th September 2019
+Modified 25th September 2019
     - completely restructured
-    - directly accessing INA219 - no library
 ToDo:
    - 
    - 
 Author: Robin Harris
-Date: 30-09-2019
+Date: 25-09-2019
 */
 
 #include <Arduino.h>
@@ -18,13 +17,12 @@ Date: 30-09-2019
 #include <ESP8266WiFiMulti.h>
 #include <SSD1306.h>
 #include <OLEDDisplayUi.h>
+#include <Adafruit_INA219.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <FS.h>
 #include "font.h"
-
-#define Addr_INA219 0x40
 
 ESP8266WiFiMulti wifiConnection;
 ESP8266WebServer server(80);
@@ -32,6 +30,7 @@ ESP8266WebServer server(80);
 // Initialize the OLED display using Wire library
 SSD1306Wire display(0x3c, D3, D4);
 OLEDDisplayUi ui(&display);
+Adafruit_INA219 ina219;
 
 // Global variables
 unsigned long wifiTimeoutDelay = 3000;   // milliseconds to wait for a connection before aborting
@@ -55,15 +54,6 @@ unsigned long fileUpdateInterval = loggingInterval[0];
 const unsigned long displayInterval = 500; // mS between OLED updates
 // pin to monitor the button
 const byte interruptPin = 5; //GPIO12 = D6 GPIO05 = D1
-
-// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// INA219 Configuration
-const uint16_t config_INA219 = 0x119f;
-const uint16_t cal_INA219 = 0x2800;
-const float currentDivider = 2.5;
-const float powerMultiplier = 0.8;
-// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
 // end globals
 
 //prototype function definitions
@@ -204,25 +194,12 @@ void setup()
         server.begin();
     }
     SPIFFS.begin();
+    ina219.begin();
+    ina219.setCalibration_16V_400mA();
     delay(2000); // time to read IP address
     ui.init();   // start the ui
     // now read the old filename and increment it
     logFile = updateFileName();
-
-    // Set up INA219 and configure
-    Wire.begin();
-    // Write config register 0x00
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x00);
-    Wire.write((config_INA219 >> 8) & 0xFF); // Upper 8-bits
-    Wire.write(config_INA219 & 0xFF);        // Lower 8-bits
-    Wire.endTransmission();
-    // Write calibration register 0x05
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x05);
-    Wire.write((cal_INA219 >> 8) & 0xFF); // Upper 8-bits
-    Wire.write(cal_INA219 & 0xFF);        // Lower 8-bits
-    Wire.endTransmission();
 }
 
 void loop()
@@ -285,24 +262,9 @@ void loop()
     }
     // get the latest values from the ina219
     unsigned long millisNow = millis();
-    // get shunt voltage
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x01);
-    Wire.endTransmission();
-    Wire.requestFrom(Addr_INA219, 2);
-    shuntVoltage = Wire.read()<<8 | Wire.read();
-    // get bus voltage
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x02);
-    Wire.endTransmission();
-    Wire.requestFrom(Addr_INA219, 2);
-    busVoltage = Wire.read()<<8 | Wire.read();
-    // get current 
-    Wire.beginTransmission(Addr_INA219);
-    Wire.write(0x04);
-    Wire.endTransmission();
-    Wire.requestFrom(Addr_INA219, 2);
-    current_mA = Wire.read()<<8 | Wire.read();
+    shuntVoltage = ina219.getShuntVoltage_mV(); //the voltage ACROSS the shunt
+    busVoltage = ina219.getBusVoltage_V();      //the voltage AFTER the shunt
+    current_mA = ina219.getCurrent_mA();
     energy_mWH += busVoltage * current_mA * (millisNow - previousLoopMillis) / 3600000;
     previousLoopMillis = millisNow;
     handleDisplayData(shuntVoltage, busVoltage, current_mA, energy_mWH);
