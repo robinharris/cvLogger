@@ -6,11 +6,12 @@ Reads INA219 each time round LOOP.
 Modified 30th September 2019
     - completely restructured
     - directly accessing INA219 - no library
+    - calibrated
 ToDo:
    - 
    - 
 Author: Robin Harris
-Date: 30-09-2019
+Date: 3-10-2019
 */
 
 #include <Arduino.h>
@@ -46,21 +47,23 @@ float displaySupplyVoltage = 0; // voltage of the supply
 float displayPower_mW = 0;
 float displayEnergy_mWH = 0;
 char displayString[100]; // holds string ready to display
+const unsigned long displayInterval = 500; // mS between OLED updates
+// logging
 String logFile;
 bool loggingActive = false;
 const int loggingInterval[] = {500, 1000, 5000, 10000, 30000, 60000, 300000, 600000}; // mS between log updates
 const int numberOfIntervals = sizeof(loggingInterval) / sizeof(loggingInterval[0]);
 byte loggingIntervalIndex = 0;
 unsigned long fileUpdateInterval = loggingInterval[0];
-const unsigned long displayInterval = 500; // mS between OLED updates
 // pin to monitor the button
 const byte interruptPin = 5; //GPIO12 = D6 GPIO05 = D1
-
 // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 // INA219 Configuration
+#define Addr_INA219 0x40 // INA219 I2C Address
+int16_t configRegister = 0x00;
 const uint16_t config_INA219 = 0x119f;
-const uint16_t cal_INA219 = 0x2800;
-const float currentDivider = 2.5;
+const uint16_t cal_INA219 = 9500; // set by measuring shunt current and adjusting this to match DM
+const uint32_t currentDivider = 25;
 const float powerMultiplier = 0.8;
 // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -102,7 +105,7 @@ void menu(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
     }
     else
     {
-        display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]) + " S");
+        display->drawString(20 + x, 24 + y, String(loggingInterval[loggingIntervalIndex]/1000) + " S");
     }
 }
 
@@ -126,7 +129,7 @@ OverlayCallback overlays[] = {overlayLogging};
 int overlaysCount = 1;
 int framesCount = 2;
 
-// The ISR - notice the attribute ICACHE_RAM_ATTR must be used to it is held in IRAM
+// The ISR - notice the attribute ICACHE_RAM_ATTR must be used as it is held in IRAM
 // This ISR deals with a button press
 void ICACHE_RAM_ATTR PushButton()
 {
@@ -136,7 +139,7 @@ void ICACHE_RAM_ATTR PushButton()
     attachInterrupt(digitalPinToInterrupt(interruptPin), ReleaseButton, RISING);
 }
 
-// The ISR - notice the attribure ICACHE_RAM_ATTR must be used to it is held in IRAM
+// The ISR - notice the attribure ICACHE_RAM_ATTR must be used as it is held in IRAM
 // This ISR deals with a button release
 void ICACHE_RAM_ATTR ReleaseButton()
 {
@@ -151,6 +154,8 @@ void setup()
     // start a serial monitor
     Serial.begin(115200);
     delay(10);
+
+    // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     // display and ui stuff
     ui.setTargetFPS(10);
     ui.disableAllIndicators();
@@ -165,6 +170,7 @@ void setup()
     display.setFont(ArialMT_Plain_10);
     display.drawString(0, 20, "Connecting to WiFi");
     display.display();
+    // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
     wifiConnection.addAP("Kercem2", "E0E3106433F4");
     wifiConnection.addAP("workshop", "workshop");
@@ -192,25 +198,35 @@ void setup()
         display.drawString(0, 40, displayString);
         display.display();
     }
+
+    // set up button pin and interrupt
     pinMode(interruptPin, INPUT);
     attachInterrupt(digitalPinToInterrupt(interruptPin), PushButton, FALLING);
+
+    // server callbacks
     server.on("/list", HTTP_GET, printDirectory);
     server.on("/delete", HTTP_GET, deleteFile);
     server.on("/", HTTP_GET, printDirectory);
     server.onNotFound(handleOther);
+
+    // set up MDNS if we have a wifi connection
     if (WiFi.status() == WL_CONNECTED)
     {
         MDNS.begin("cv");
         server.begin();
     }
+
+    //set up SPIFFS
     SPIFFS.begin();
+
     delay(2000); // time to read IP address
+
     ui.init();   // start the ui
     // now read the old filename and increment it
     logFile = updateFileName();
 
+    // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     // Set up INA219 and configure
-    Wire.begin();
     // Write config register 0x00
     Wire.beginTransmission(Addr_INA219);
     Wire.write(0x00);
@@ -223,6 +239,7 @@ void setup()
     Wire.write((cal_INA219 >> 8) & 0xFF); // Upper 8-bits
     Wire.write(cal_INA219 & 0xFF);        // Lower 8-bits
     Wire.endTransmission();
+    // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 }
 
 void loop()
@@ -237,7 +254,6 @@ void loop()
     static int totalShort = 0;
     static int totalLong = 0;
     ui.update();
-    MDNS.update();
     // button goes from up to down
     if (oldButtonState == false && buttonState == true)
     {
@@ -278,11 +294,13 @@ void loop()
         }
     }
 
-    // handle client requests if we have a WiFi connection
+    // handle client requests amd MDNS if we have a WiFi connection
     if (WiFi.status() == WL_CONNECTED)
     {
+        MDNS.update();
         server.handleClient();
     }
+
     // get the latest values from the ina219
     unsigned long millisNow = millis();
     // get shunt voltage
@@ -290,19 +308,22 @@ void loop()
     Wire.write(0x01);
     Wire.endTransmission();
     Wire.requestFrom(Addr_INA219, 2);
-    shuntVoltage = Wire.read()<<8 | Wire.read();
+    uint16_t shuntVoltage_raw = Wire.read() << 8 | Wire.read();
+    shuntVoltage = (float)shuntVoltage_raw * 0.01;
     // get bus voltage
     Wire.beginTransmission(Addr_INA219);
     Wire.write(0x02);
     Wire.endTransmission();
     Wire.requestFrom(Addr_INA219, 2);
-    busVoltage = Wire.read()<<8 | Wire.read();
-    // get current 
+    uint16_t busVoltage_raw = Wire.read() << 8 | Wire.read();
+    busVoltage = (float)(busVoltage_raw >> 3) * 0.00406; // set empiracally to make INA219 same as DM
+    // get current
     Wire.beginTransmission(Addr_INA219);
     Wire.write(0x04);
     Wire.endTransmission();
     Wire.requestFrom(Addr_INA219, 2);
-    current_mA = Wire.read()<<8 | Wire.read();
+    uint16_t current_raw = Wire.read() << 8 | Wire.read();
+    current_mA = (float)current_raw / currentDivider;
     energy_mWH += busVoltage * current_mA * (millisNow - previousLoopMillis) / 3600000;
     previousLoopMillis = millisNow;
     handleDisplayData(shuntVoltage, busVoltage, current_mA, energy_mWH);
@@ -319,7 +340,6 @@ void handleDisplayData(float shuntVoltage, float busVoltage, float current, floa
     static unsigned long previousMillis = 0;
 
     millisNow = millis();
-    previousMillis = millisNow;
     cumShuntVoltage += shuntVoltage;
     cumBusVoltage += busVoltage;
     cumCurrent += current;
@@ -328,12 +348,12 @@ void handleDisplayData(float shuntVoltage, float busVoltage, float current, floa
     // average for the interval is copied to global variables for display
     if ((millisNow - previousMillis) > displayInterval)
     {
-        displaySupplyVoltage = (cumBusVoltage + (cumShuntVoltage / 100)) / numberOfReadings;
+        displaySupplyVoltage = (cumBusVoltage + (cumShuntVoltage / 1000)) / numberOfReadings;
         displayCurrent_mA = cumCurrent / numberOfReadings;
         displayBusVoltage = cumBusVoltage / numberOfReadings;
         displayPower_mW = displayBusVoltage * displayCurrent_mA;
         displayEnergy_mWH = energy;
-        previousMillis = 0;
+        previousMillis = millisNow;
         numberOfReadings = 0;
         cumBusVoltage = 0;
         cumCurrent = 0;
@@ -360,6 +380,7 @@ void handleFileData(float shuntVoltage, float busVoltage, float current, float e
     if ((millisNow - previousMillis) > fileUpdateInterval)
     {
         File cvLogFile;
+        // if logging is no active just return
         if (!loggingActive)
         {
             return;
