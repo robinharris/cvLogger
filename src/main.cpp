@@ -56,13 +56,13 @@ const int numberOfIntervals = sizeof(loggingInterval) / sizeof(loggingInterval[0
 byte loggingIntervalIndex = 0;
 unsigned long fileUpdateInterval = loggingInterval[0];
 // pin to monitor the button
-const byte interruptPin = 5; //GPIO12 = D6 GPIO05 = D1
+const byte interruptPin = 12; //GPIO12 = D6 GPIO05 = D1
 // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 // INA219 Configuration
 #define Addr_INA219 0x40 // INA219 I2C Address
 int16_t configRegister = 0x00;
 const uint16_t config_INA219 = 0x119f;
-const uint16_t cal_INA219 = 9500; // set by measuring shunt current and adjusting this to match DM
+const uint16_t cal_INA219 = 9800; // set by measuring shunt current and adjusting this to match DM
 const uint32_t currentDivider = 25;
 const float powerMultiplier = 0.8;
 // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -316,7 +316,7 @@ void loop()
     Wire.endTransmission();
     Wire.requestFrom(Addr_INA219, 2);
     uint16_t busVoltage_raw = Wire.read() << 8 | Wire.read();
-    busVoltage = (float)(busVoltage_raw >> 3) * 0.00406; // set empiracally to make INA219 same as DM
+    busVoltage = (float)(busVoltage_raw >> 3) * 0.00404; // set empiracally to make INA219 same as DM
     // get current
     Wire.beginTransmission(Addr_INA219);
     Wire.write(0x04);
@@ -369,6 +369,9 @@ void handleFileData(float shuntVoltage, float busVoltage, float current, float e
     static int numberOfReadings = 0;
     unsigned long millisNow;
     static unsigned long previousMillis = 0;
+    float aveShuntVoltage = 0;
+    float aveBusVoltage = 0;
+    float aveCurrent = 0;
 
     millisNow = millis();
     cumShuntVoltage += shuntVoltage;
@@ -380,20 +383,28 @@ void handleFileData(float shuntVoltage, float busVoltage, float current, float e
     if ((millisNow - previousMillis) > fileUpdateInterval)
     {
         File cvLogFile;
-        // if logging is no active just return
+        // if logging is not active reset cumulatives and previousMillis then just return
         if (!loggingActive)
         {
+            previousMillis = millisNow;
+            numberOfReadings = 0;
+            cumBusVoltage = 0;
+            cumCurrent = 0;
+            cumShuntVoltage = 0;
             return;
         }
+        aveBusVoltage = cumBusVoltage / numberOfReadings;
+        aveShuntVoltage = cumShuntVoltage / numberOfReadings;
+        aveCurrent = cumCurrent / numberOfReadings;
         String lineToOutput = String(millisNow);
         lineToOutput += ",";
-        lineToOutput += String((cumBusVoltage + (cumShuntVoltage / 100)) / numberOfReadings, 3);
+        lineToOutput += String((aveBusVoltage + (aveShuntVoltage / 100)), 3);
         lineToOutput += ",";
-        lineToOutput += String(cumBusVoltage / numberOfReadings, 3);
+        lineToOutput += String(aveBusVoltage, 3);
         lineToOutput += ",";
-        lineToOutput += String(cumCurrent / numberOfReadings, 1);
+        lineToOutput += String(aveCurrent, 1);
         lineToOutput += ",";
-        lineToOutput += String(cumBusVoltage * cumCurrent, 0);
+        lineToOutput += String((aveBusVoltage * aveCurrent ), 0);
         lineToOutput += ",";
         lineToOutput += String(energy, 3);
         cvLogFile = SPIFFS.open(logFile, "a");
